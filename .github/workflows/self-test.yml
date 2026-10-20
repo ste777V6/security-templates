@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------------------
+# Self-test: runs the reusable template against the deliberately vulnerable
+# demo/ app in THIS repo, so anyone can see real findings in the Security tab.
+# Report-only (enforce: false) so the repo's checks stay green.
+# ---------------------------------------------------------------------------
+name: self-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  devsecops:
+    uses: ./.github/workflows/devsecops-reusable.yml
+    with:
+      container-scan: true
+      dockerfile: demo/Dockerfile
+      iac-path: demo/
+      enforce: false

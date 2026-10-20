@@ -1,0 +1,24 @@
+# ---------------------------------------------------------------------------
+# What an engineering team adds to THEIR repo: .github/workflows/security.yml
+# That's the whole integration — the scanners, versions and rules are owned
+# centrally in <org>/security-templates.
+# ---------------------------------------------------------------------------
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  devsecops:
+    uses: YOUR-GITHUB-USERNAME/security-templates/.github/workflows/devsecops-reusable.yml@v1
+    with:
+      container-scan: true
+      dockerfile: docker/Dockerfile
+      iac-path: infra/
+      enforce: false        # first 2 weeks: report only, then flip to true

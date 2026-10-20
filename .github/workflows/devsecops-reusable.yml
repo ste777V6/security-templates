@@ -1,0 +1,153 @@
+# ---------------------------------------------------------------------------
+# Reusable DevSecOps pipeline
+# Lives in a central repo:  <org>/security-templates/.github/workflows/devsecops-reusable.yml
+# Teams call it with one `uses:` line (see caller-example.yml) instead of
+# copy-pasting scanners into every repo. The security team versions it (v1, v2…)
+# and teams upgrade on their own schedule.
+#
+# Stages:  secrets -> SAST -> SCA (dependencies) -> IaC -> container image
+# Output:  SARIF uploaded to GitHub Security tab + gate on severity threshold
+# Tools:   Gitleaks, Semgrep, Trivy (all open source, no licence keys needed).
+#          Swap any stage for Snyk if your org licenses it.
+# ---------------------------------------------------------------------------
+name: devsecops-reusable
+
+on:
+  workflow_call:
+    inputs:
+      severity-threshold:
+        description: "Lowest severity that fails the build (Trivy scale)"
+        type: string
+        default: "HIGH,CRITICAL"
+      iac-path:
+        description: "Folder with Terraform / K8s manifests / Dockerfiles"
+        type: string
+        default: "."
+      container-scan:
+        description: "Build and scan a container image"
+        type: boolean
+        default: false
+      dockerfile:
+        description: "Path to the Dockerfile (when container-scan is true)"
+        type: string
+        default: "Dockerfile"
+      enforce:
+        description: "true = fail the pipeline on findings; false = report only (onboarding mode)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  security-events: write   # needed to upload SARIF
+
+jobs:
+  # 1. Secrets ---------------------------------------------------------------
+  secrets:
+    name: Secrets scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history: catch secrets committed then "deleted"
+      - name: Run Gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect --source /repo --redact \
+            --report-format sarif --report-path /repo/gitleaks.sarif \
+            --exit-code ${{ inputs.enforce && '1' || '0' }}
+      - name: Upload results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks.sarif
+          category: secrets
+
+  # 2. SAST ------------------------------------------------------------------
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Semgrep
+        run: pipx install semgrep
+      - name: Run Semgrep
+        run: |
+          semgrep scan --config p/default --severity ERROR \
+            --sarif --output semgrep.sarif \
+            ${{ inputs.enforce && '--error' || '' }}
+      - name: Upload results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: sast
+
+  # 3. SCA (dependencies) ----------------------------------------------------
+  sca:
+    name: Dependency scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln
+          ignore-unfixed: true          # only fail on issues that have a fix
+          severity: ${{ inputs.severity-threshold }}
+          format: sarif
+          output: trivy-sca.sarif
+          exit-code: ${{ inputs.enforce && '1' || '0' }}
+      - name: Upload results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-sca.sarif
+          category: sca
+
+  # 4. IaC misconfiguration --------------------------------------------------
+  iac:
+    name: IaC scan (Trivy config)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Trivy config scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: ${{ inputs.iac-path }}
+          severity: ${{ inputs.severity-threshold }}
+          format: sarif
+          output: trivy-iac.sarif
+          exit-code: ${{ inputs.enforce && '1' || '0' }}
+      - name: Upload results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-iac.sarif
+          category: iac
+
+  # 5. Container image (optional) -------------------------------------------
+  container:
+    name: Container image scan (Trivy)
+    if: inputs.container-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -f "${{ inputs.dockerfile }}" -t scan-target:${{ github.sha }} .
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: scan-target:${{ github.sha }}
+          ignore-unfixed: true
+          severity: ${{ inputs.severity-threshold }}
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: ${{ inputs.enforce && '1' || '0' }}
+      - name: Upload results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: container
